@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>바코드 스캔 속도 테스트</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Malgun Gothic", sans-serif; background: #f1f3f5; color: #111318; }
+  main { max-width: 480px; margin: 0 auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  h1 { font-size: 18px; margin: 0; display: flex; align-items: center; gap: 8px; }
+  .badge { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 99px; background: #e2e7ed; color: #516073; }
+  .badge.ok { background: #e8f6ef; color: #0b7a50; } .badge.warn { background: #fff7e6; color: #b7791f; }
+  #cam { position: relative; height: 170px; border-radius: 16px; overflow: hidden; background: #1b1f24; }
+  #cam video { width: 100%; height: 100%; object-fit: cover; }
+  #band { position: absolute; left: 4%; right: 4%; top: 12%; bottom: 12%; border: 2px solid rgba(255,255,255,.9); border-radius: 12px; pointer-events: none; }
+  #cam.full #band { left: 0; right: 0; top: 0; bottom: 0; border-color: rgba(255,255,255,.35); }
+  #msg { position: absolute; left: 0; right: 0; bottom: 5px; text-align: center; font-size: 11px; font-weight: 600; color: #d5dbe3; }
+  #big { border-radius: 16px; padding: 14px 16px; background: #fff; border: 1px solid #e2e7ed; transition: background-color .25s; }
+  #big.flash { background: #b8f0d2; transition: none; }
+  #code { font-size: 26px; font-weight: 800; letter-spacing: .5px; word-break: break-all; }
+  #sub { font-size: 13px; color: #516073; margin-top: 2px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { background: #fff; border: 1px solid #e2e7ed; border-radius: 14px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 24px; font-weight: 800; } .stat span { font-size: 12px; color: #516073; font-weight: 600; }
+  .row { display: flex; gap: 8px; } .row > * { flex: 1; }
+  button { height: 52px; border-radius: 99px; border: 1px solid #cfd6df; background: #fff; font-size: 15px; font-weight: 800; color: #111318; }
+  button.dark { background: #111318; color: #fff; border-color: #111318; }
+  label.opt { display: flex; align-items: center; gap: 8px; background: #fff; border: 1px solid #e2e7ed; border-radius: 12px; padding: 10px 12px; font-size: 13px; font-weight: 600; }
+  label.opt input { width: 20px; height: 20px; }
+  ol { margin: 0; padding: 4px 12px 4px 34px; background: #fff; border: 1px solid #e2e7ed; border-radius: 14px; font-size: 13px; }
+  ol li { padding: 5px 0; border-bottom: 1px solid #f1f3f5; } ol li:last-child { border: 0; } ol li i { color: #8a96a8; font-style: normal; float: right; }
+  p.note { font-size: 12px; line-height: 1.5; color: #516073; margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>바코드 스캔 속도 테스트 <span id="engine" class="badge">준비 전</span></h1>
+  <div id="cam"><video id="video" playsinline muted></video><div id="band"></div><div id="msg">[시작]을 누르고 바코드를 띠 안에 비추세요</div></div>
+  <div id="big"><div id="code">-</div><div id="sub">읽으면 초록색으로 깜빡이고 진동합니다</div></div>
+  <div class="grid">
+    <div class="stat"><span>스캔한 수</span><b id="sCount">0</b></div>
+    <div class="stat"><span>박스당 평균 간격</span><b id="sGap">-</b></div>
+    <div class="stat"><span>판독 1회 걸린 시간</span><b id="sMs">-</b></div>
+    <div class="stat"><span>초당 판독 시도</span><b id="sFps">-</b></div>
+  </div>
+  <div class="row"><button id="start" class="dark">시작</button><button id="torch" disabled>손전등</button><button id="clear">기록 지우기</button></div>
+  <label class="opt"><input type="checkbox" id="oBand" checked> 가운데 띠만 읽기 (끄면 화면 전체)</label>
+  <label class="opt"><input type="checkbox" id="oHd" checked> 고해상도 1080 (끄면 720)</label>
+  <label class="opt"><input type="checkbox" id="oRepeat"> 같은 바코드도 계속 세기 (끄면 화면에서 뗐다 다시 비춰야 1개 추가)</label>
+  <label class="opt"><input type="checkbox" id="oSound" checked> 소리</label>
+  <ol id="log"></ol>
+  <p class="note">Code128(박스 라벨) 바코드만 읽습니다. 안드로이드 크롬·삼성 인터넷에서는 기기 내장 판독기를 씁니다. 이 페이지는 아무것도 저장하거나 전송하지 않습니다.</p>
+</main>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const video = $("video"), cam = $("cam");
+let reader = null, stream = null, track = null, running = false, busy = false, torchOn = false;
+let gate = { code: null, seen: 0, accepted: 0 };
+let scans = [], msSum = 0, msN = 0, tries = 0, triesStart = 0, audio = null;
+const canvas = document.createElement("canvas");
+const ctx = canvas.getContext("2d", { willReadFrequently: true, alpha: false });
+
+async function createReader() {
+  if ("BarcodeDetector" in window) {
+    try {
+      const formats = await BarcodeDetector.getSupportedFormats();
+      if (formats.includes("code_128")) {
+        const det = new BarcodeDetector({ formats: ["code_128"] });
+        return { engine: "내장 판독기", cls: "ok", detect: async (src) => (await det.detect(src)).map((b) => (b.rawValue || "").trim()).filter(Boolean) };
+      }
+    } catch (e) { /* 아래 대체 엔진 */ }
+  }
+  const mod = await import("https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.4/dist/es/reader/index.js");
+  return { engine: "대체 엔진(느림)", cls: "warn", detect: async (src) => {
+    let c = src;
+    if (src === video) { canvas.width = video.videoWidth; canvas.height = video.videoHeight; ctx.drawImage(video, 0, 0); c = canvas; }
+    const img = c.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, c.width, c.height);
+    return (await mod.readBarcodes(img, { formats: ["Code128"], tryHarder: false, maxNumberOfSymbols: 1 })).map((r) => (r.text || "").trim()).filter(Boolean);
+  } };
+}
+window.__createReader = createReader;
+
+function band() {
+  const box = video.getBoundingClientRect(), vw = video.videoWidth, vh = video.videoHeight;
+  const scale = Math.max(box.width / vw, box.height / vh), sw = box.width / scale, sh = box.height / scale;
+  return { sx: Math.round((vw - sw) / 2 + sw * 0.04), sy: Math.round((vh - sh) / 2 + sh * 0.12), sw: Math.round(sw * 0.92), sh: Math.round(sh * 0.76) };
+}
+
+function beep() {
+  try { navigator.vibrate && navigator.vibrate(50); } catch (e) {}
+  if (!$("oSound").checked || !audio) return;
+  const t = audio.currentTime, o = audio.createOscillator(), g = audio.createGain();
+  o.frequency.value = 1320; g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+  o.connect(g).connect(audio.destination); o.start(t); o.stop(t + 0.07);
+}
+
+function accept(code, ms) {
+  const now = performance.now(), prev = scans[scans.length - 1];
+  scans.push({ code, at: now, gap: prev ? (now - prev.at) / 1000 : null, ms });
+  beep();
+  $("big").classList.add("flash"); requestAnimationFrame(() => requestAnimationFrame(() => $("big").classList.remove("flash")));
+  $("code").textContent = code;
+  $("sub").textContent = `이번 판독 ${Math.round(ms)}ms` + (prev ? ` · 앞 스캔에서 ${((now - prev.at) / 1000).toFixed(1)}초` : "");
+  render();
+}
+
+function render() {
+  $("sCount").textContent = scans.length;
+  const gaps = scans.map((s) => s.gap).filter((g) => g !== null && g < 30);
+  $("sGap").textContent = gaps.length ? (gaps.reduce((a, b) => a + b, 0) / gaps.length).toFixed(1) + "초" : "-";
+  $("sMs").textContent = msN ? Math.round(msSum / msN) + "ms" : "-";
+  $("log").innerHTML = scans.slice(-15).reverse().map((s, i) => `<li value="${scans.length - i}">${s.code} <i>${s.gap === null ? "" : "+" + s.gap.toFixed(1) + "초 · "}${Math.round(s.ms)}ms</i></li>`).join("");
+}
+
+async function tick() {
+  if (!running) return;
+  schedule();
+  if (busy || video.readyState < 2 || document.hidden || !video.videoWidth) return;
+  busy = true;
+  const t0 = performance.now();
+  try {
+    let found;
+    if ($("oBand").checked) {
+      const b = band(), ratio = Math.min(1, 1280 / b.sw), cw = Math.round(b.sw * ratio), ch = Math.round(b.sh * ratio);
+      if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+      ctx.drawImage(video, b.sx, b.sy, b.sw, b.sh, 0, 0, cw, ch);
+      found = await reader.detect(canvas);
+    } else {
+      found = await reader.detect(video);
+    }
+    const ms = performance.now() - t0, now = performance.now();
+    msSum += ms; msN += 1; tries += 1;
+    if (now - triesStart >= 1000) { $("sFps").textContent = Math.round((tries * 1000) / (now - triesStart)) + "회"; $("sMs").textContent = Math.round(msSum / msN) + "ms"; tries = 0; triesStart = now; if (msN > 60) { msSum = (msSum / msN) * 20; msN = 20; } }
+    if (found.length) {
+      const code = found[0].toUpperCase(), same = gate.code === code, left = now - gate.seen > 800;
+      if (same) gate.seen = now;
+      if ((!same || left || $("oRepeat").checked) && now - gate.accepted > 250) { gate = { code, seen: now, accepted: now }; accept(code, ms); }
+    }
+  } catch (e) { /* 한 프레임 실패는 넘어간다 */ } finally { busy = false; }
+}
+function schedule() { if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(tick); else requestAnimationFrame(tick); }
+
+async function start() {
+  $("msg").textContent = "카메라 여는 중…";
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)(); audio.resume();
+    reader = reader || await createReader();
+    $("engine").textContent = reader.engine; $("engine").className = "badge " + reader.cls;
+    const hd = $("oHd").checked;
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" }, width: { ideal: hd ? 1920 : 1280 }, height: { ideal: hd ? 1080 : 720 } } });
+    track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.focusMode && caps.focusMode.includes("continuous")) track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(() => {});
+    $("torch").disabled = !caps.torch;
+    video.srcObject = stream; await video.play();
+    try { if (navigator.wakeLock) await navigator.wakeLock.request("screen"); } catch (e) {}
+    running = true; triesStart = performance.now(); tries = 0;
+    $("start").textContent = "정지"; $("start").classList.remove("dark");
+    const s = track.getSettings ? track.getSettings() : {};
+    $("msg").textContent = `바코드를 띠 안에 · 카메라 ${s.width || video.videoWidth}×${s.height || video.videoHeight}`;
+    schedule();
+  } catch (e) {
+    const n = e && e.name;
+    $("msg").textContent = n === "NotAllowedError" ? "카메라 권한을 허용해 주세요 (주소창 자물쇠)" : n === "NotFoundError" ? "카메라를 찾지 못했습니다" : "시작 실패: " + (e && e.message ? e.message : e);
+  }
+}
+function stop() {
+  running = false; if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; track = null; torchOn = false;
+  $("start").textContent = "시작"; $("start").classList.add("dark"); $("torch").disabled = true; $("msg").textContent = "정지됨";
+}
+$("start").onclick = () => (running ? stop() : start());
+$("torch").onclick = async () => { if (!track) return; torchOn = !torchOn; try { await track.applyConstraints({ advanced: [{ torch: torchOn }] }); } catch (e) { torchOn = false; } };
+$("clear").onclick = () => { scans = []; msSum = 0; msN = 0; gate = { code: null, seen: 0, accepted: 0 }; $("code").textContent = "-"; $("sub").textContent = "읽으면 초록색으로 깜빡이고 진동합니다"; $("sFps").textContent = "-"; render(); };
+$("oBand").onchange = () => cam.classList.toggle("full", !$("oBand").checked);
+$("oHd").onchange = () => { if (running) { stop(); start(); } };
+</script>
+</body>
+</html>
